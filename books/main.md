@@ -150,5 +150,383 @@ fn panic(_info: &PanicInfo) -> ! {
 こんな感じで、QEMUのウィンドウが開き、「hello, world!」と表示されれば成功です！
 
 お疲れさまでした！これで、最初の基礎的なOSの一部が完成しました。
-次の章では、カーネルを作成して、「Hello, from MyOS!」と表示する方法を学びます。
+次の章では、カーネルを作成して、四角形を表示する方法を学びます。
+
 ここまで理解できたあなたは素晴らしいと思います！ブートさせること自体が、一つ目の大きな山なので。
+
+## 2. カーネルの作成
+ブートローダーが完成したので、次はカーネルを作成しましょう。
+カーネルって何？と思うと思います。
+
+カーネルはOSの中心的な部分で、ハードウェアとソフトウェアの間の橋渡しをします。
+
+カーネルは、メモリ管理、プロセス管理、ファイルシステム管理など、OSの基本的な機能を提供します。
+有名なカーネルには、LinuxカーネルやWindows NTカーネルなどがあります。
+カーネルがないとOSは成り立ちませんし、カーネルが存在しないOSはOSと言えません。つまり、脳みそであり心臓である部分です。
+
+ここでは、非常にシンプルなカーネルを作成し、四角形を表示する方法を学びます。
+
+カーネルは`src/kernel`ディレクトリに配置していきます。
+まずは、`src/kernel/lib.rs`というファイルを作成し、以下のコードを追加します。
+```rust
+#![no_std]
+#![feature(abi_x86_interrupt)]
+#![allow(unused)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+
+/// カーネル本体
+pub mod kernel;
+```
+
+いまはまだ寂しいですね。ですが、機能が増えるにつれて賑やかになっていきます！
+
+次に、`src/kernel/kernel.rs`というファイルを作成し、以下のコードを追加します。
+これはカーネルのエントリーポイントとなる関数を定義します。
+```rust
+/// カーネルエントリーポイント
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_entry() -> ! {
+    loop {}
+}
+```
+
+まだ何もしていませんが、これでカーネルのメインとなる関数が定義されました。今後は、ここに機能を追加していきます。
+
+さて、このままだとカーネルは実行されません。（当たり前ですが...）
+そこで、ブートローダーからカーネルを呼び出す必要があります。
+`src/boot/loader.rs`ファイルを開き、以下のように最後にカーネルを呼び出すコードを追加します。
+
+```diff
+#![no_std]
+#![no_main]
+
+use uefi::prelude::*;
+use core::panic::PanicInfo;
++ use kernel::kernel::kernel_entry;
+
+extern crate alloc;
+
+#[global_allocator]
+static ALLOCATOR: uefi::allocator::Allocator = uefi::allocator::Allocator;
+
+// パニックハンドラの実装
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {}
+}
+
+#[entry]
+fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
+    if let Err(_) = uefi::helpers::init(&mut system_table) {
+        return Status::UNSUPPORTED;
+    }
+
+    let _ = system_table.stdout().clear();
+    let _ = system_table
+        .stdout()
+        .output_string(cstr16!("Starting MyOS...\n"));
++
++    // ブートサービスの終了
++    let _ = unsafe { system_table.exit_boot_services(uefi::table::boot::MemoryType::LOADER_DATA) };
++
++    kernel_entry();
+
+-    loop {}
+}
+```
+
+`let (_system_table, memory_map_iter) = unsafe { system_table.exit_boot_services(...) };`の部分は、UEFIのブートサービスを終了させるためのコードです。
+UEFIのブートサービスを終了させることで、OSがハードウェアを直接制御できるようになります。
+逆にこれをしないと、UEFIがハードウェアを制御し続けてしまい、OSの意味がなくなってしまいます。
+
+では、さっそくビルド！...と言いたいところですが、このままだとカーネルがビルドされないため、`Cargo.toml`ファイルに以下の内容を追加します。（`[[bin]]`セクションの下あたりが良いでしょう。）
+
+```toml
+[lib]
+name = "kernel"
+path = "src/kernel/lib.rs"
+```
+これで、Cargoは`src/kernel/lib.rs`ファイルをライブラリとしてビルドします。
+あれ？`kernel.rs`じゃないの？と思うかもしれませんが、`kernel.rs`にいろいろ機能を追加していくと、ファイルが肥大化してしまうため、`lib.rs`をライブラリとしてビルドし、`kernel.rs`をモジュールとしてインポートする形にしています。
+
+では実行してみましょう！
+```bash
+cargo run
+```
+...あれれ？なにも表示されませんね。
+当たり前です。今のままだとカーネルの`kernel_entry`関数は何もしていません。
+
+では、どうやって四角形を表示させるかというと、UEFIのシステムテーブルをカーネルに渡して、ディスプレイに文字を表示させる必要があります。
+
+しかし、現状のコードではシステムテーブルをカーネルに渡していません。
+そこで、`kernel_entry`関数の引数にシステムテーブルを追加し、ブートローダーから渡すように変更します。
+まず、`src/kernel/kernel.rs`ファイルを以下のように変更します。
+```diff
++ pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
+```
+
+次に、boot_info構造体を定義します。lib.rsの末尾に以下のコードを追加します。
+```rust
+#[repr(C)]
+pub struct BootInfo {
+    /// 物理メモリオフセット
+    pub physical_memory_offset: u64,
+    /// フレームバッファアドレス
+    pub framebuffer_addr: u64,
+    /// フレームバッファサイズ
+    pub framebuffer_size: usize,
+    /// 画面の幅（ピクセル）
+    pub screen_width: usize,
+    /// 画面の高さ（ピクセル）
+    pub screen_height: usize,
+    /// 1行あたりのバイト数
+    pub stride: usize,
+    /// メモリマップのアドレス
+    pub memory_map_addr: u64,
+    /// メモリマップのエントリ数
+    pub memory_map_len: usize,
+    /// メモリマップの各エントリサイズ
+    pub memory_map_entry_size: usize,
+}
+
+/// メモリ領域の種類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub enum MemoryType {
+    /// 使用可能
+    Usable,
+    /// 予約済み
+    Reserved,
+    /// ACPIで再利用可能
+    AcpiReclaimable,
+    /// ACPI NVS
+    AcpiNvs,
+    /// 不良メモリ
+    BadMemory,
+    /// ブートローダーで使用中
+    BootloaderReclaimable,
+    /// カーネルスタック
+    KernelStack,
+    /// ページテーブル
+    PageTable,
+    /// フレームバッファ
+    Framebuffer,
+}
+
+/// メモリマップエントリ
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct MemoryRegion {
+    /// 開始アドレス
+    pub start: u64,
+    /// 長さ（バイト）
+    pub len: u64,
+    /// 領域の種類
+    pub region_type: MemoryType,
+}
+```
+
+メモリマップがうんたらかんたら...とありますが、今は気にしなくて大丈夫です。将来的にメモリ管理を実装する際に使用します。詳しくは各自調べてみてください。
+そうしたら、ブートローダーからシステムテーブルを渡すように変更します。（diffを書く気力が出ないのでコードをそのまま載せます。）
+
+```rust
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use kernel::kernel::kernel_entry;
+use kernel::{BootInfo, MemoryRegion, MemoryType};
+use uefi::prelude::*;
+use uefi::proto::console::gop::GraphicsOutput;
+
+#[global_allocator]
+static ALLOCATOR: uefi::allocator::Allocator = uefi::allocator::Allocator;
+
+static mut BOOT_INFO: BootInfo = BootInfo {
+    physical_memory_offset: 0,
+    framebuffer_addr: 0,
+    framebuffer_size: 0,
+    screen_width: 0,
+    screen_height: 0,
+    stride: 0,
+    memory_map_addr: 0,
+    memory_map_len: 0,
+    memory_map_entry_size: 0,
+};
+
+// メモリマップを静的に保存
+static mut MEMORY_MAP: [MemoryRegion; 256] = [MemoryRegion {
+    start: 0,
+    len: 0,
+    region_type: MemoryType::Reserved,
+}; 256];
+
+/// UEFIエントリーポイント
+#[entry]
+fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
+    if let Err(_) = uefi::helpers::init(&mut system_table) {
+        return Status::UNSUPPORTED;
+    }
+
+    let _ = system_table.stdout().clear();
+    let _ = system_table
+        .stdout()
+        .output_string(cstr16!("Starting MyOS...\n"));
+
+    // Graphics Output Protocolを取得してフレームバッファ情報を保存
+    let (fb_addr, fb_size, screen_w, screen_h, stride) = {
+        let gop_handle = match system_table
+            .boot_services()
+            .get_handle_for_protocol::<GraphicsOutput>()
+        {
+            Ok(handle) => handle,
+            Err(_) => return Status::UNSUPPORTED,
+        };
+
+        let mut gop = match system_table
+            .boot_services()
+            .open_protocol_exclusive::<GraphicsOutput>(gop_handle)
+        {
+            Ok(gop) => gop,
+            Err(_) => return Status::UNSUPPORTED,
+        };
+
+        let mode_info = gop.current_mode_info();
+        let mut framebuffer = gop.frame_buffer();
+
+        (
+            framebuffer.as_mut_ptr() as u64,
+            framebuffer.size(),
+            mode_info.resolution().0,
+            mode_info.resolution().1,
+            mode_info.stride(),
+        )
+    };
+
+    // Boot Servicesを終了してメモリマップを取得
+    let (_system_table, memory_map_iter) =
+        unsafe { system_table.exit_boot_services(uefi::table::boot::MemoryType::LOADER_DATA) };
+
+    // メモリマップを静的配列にコピー
+    let map_count;
+    unsafe {
+        let mut count = 0;
+        for (i, desc) in memory_map_iter.entries().enumerate() {
+            if i >= 256 {
+                break;
+            }
+            MEMORY_MAP[i] = MemoryRegion {
+                start: desc.phys_start,
+                len: desc.page_count * 4096,
+                region_type: match desc.ty {
+                    uefi::table::boot::MemoryType::CONVENTIONAL => MemoryType::Usable,
+                    uefi::table::boot::MemoryType::ACPI_RECLAIM => MemoryType::AcpiReclaimable,
+                    uefi::table::boot::MemoryType::ACPI_NON_VOLATILE => MemoryType::AcpiNvs,
+                    uefi::table::boot::MemoryType::UNUSABLE => MemoryType::BadMemory,
+                    uefi::table::boot::MemoryType::LOADER_CODE
+                    | uefi::table::boot::MemoryType::LOADER_DATA => {
+                        MemoryType::BootloaderReclaimable
+                    }
+                    _ => MemoryType::Reserved,
+                },
+            };
+            count += 1;
+        }
+        map_count = count;
+    }
+
+    #[allow(static_mut_refs)]
+    unsafe {
+        BOOT_INFO.physical_memory_offset = 0;
+        BOOT_INFO.framebuffer_addr = fb_addr;
+        BOOT_INFO.framebuffer_size = fb_size;
+        BOOT_INFO.screen_width = screen_w;
+        BOOT_INFO.screen_height = screen_h;
+        BOOT_INFO.stride = stride;
+        BOOT_INFO.memory_map_addr = MEMORY_MAP.as_ptr() as u64;
+        BOOT_INFO.memory_map_len = map_count;
+        BOOT_INFO.memory_map_entry_size = core::mem::size_of::<MemoryRegion>();
+    }
+
+    unsafe {
+        kernel_entry(&*core::ptr::addr_of!(BOOT_INFO));
+    }
+}
+```
+
+ああ、そういえばカーネルにもパニックハンドラが必要です。`src/kernel/kernel.rs`ファイルを以下のようにします
+```rust
+pub use crate::{BootInfo, MemoryRegion, MemoryType};
+
+/// カーネルエントリーポイント
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
+    loop {}
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
+```
+
+では、この情報を使って、四角形を表示させましょう！
+kernel.rsに書いても良いのですが、見通しが悪くなるので、新たに`src/kernel/display.rs`ファイルを作成し、以下のコードを追加します。
+
+```rust
+/// フレームバッファに矩形を描画
+pub fn draw_rect(boot_info: &crate::BootInfo, x: usize, y: usize, w: usize, h: usize, color: u32) {
+    let fb = boot_info.framebuffer_addr as *mut u32;
+    let width = boot_info.screen_width;
+    let height = boot_info.screen_height;
+    let stride = boot_info.stride;
+
+    for dy in 0..h {
+        for dx in 0..w {
+            let px = x + dx;
+            let py = y + dy;
+            if px < width && py < height {
+                unsafe {
+                    // strideはピクセル数
+                    let offset = py * stride + px;
+                    fb.add(offset).write_volatile(color);
+                }
+            }
+        }
+    }
+}
+```
+
+次に、カーネルメインからこの関数を呼び出して四角形を表示させます。
+```rust
+pub use crate::display::draw_rect;
+pub use crate::BootInfo;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
+    // 画面左上に100x100の水色の四角形を描画
+    draw_rect(boot_info, 0, 0, 100, 100, 0x0067A7CC);
+    loop {}
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
+```
+
+では、さっそくビルドして実行してみましょう！
+```bash
+cargo run
+```
+
+うおおおお！でたぞ！！四角形が！！
+![四角形](img/rect.png)
+
+今回は私の好きな水色にしてみました。色コードは`0x00RRGGBB`形式で指定します。
+お疲れさまでした！これでカーネルから四角形を表示させることができました。
+自由に色や位置、大きさを変えてみてください！
+
+本当にお疲れさまでした！ここまで来たあなたは素晴らしいです！（というのも、筆者はここまで来るのにかなり苦労したことがあります。これができるだけでもすごいと思います！！！）

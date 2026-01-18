@@ -13,3 +13,7 @@ bitflags = "2.4"
 [[bin]]
 name = "boot"
 path = "src/boot/loader.rs"
+
+[lib]
+name = "kernel"
+path = "src/kernel/lib.rs"

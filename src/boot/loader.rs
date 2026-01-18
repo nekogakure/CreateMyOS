@@ -1,20 +1,36 @@
 #![no_std]
 #![no_main]
 
-use uefi::prelude::*;
-use core::panic::PanicInfo;
-
 extern crate alloc;
+
+use kernel::kernel::kernel_entry;
+use kernel::{BootInfo, MemoryRegion, MemoryType};
+use uefi::prelude::*;
+use uefi::proto::console::gop::GraphicsOutput;
 
 #[global_allocator]
 static ALLOCATOR: uefi::allocator::Allocator = uefi::allocator::Allocator;
 
-// パニックハンドラの実装
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {}
-}
+static mut BOOT_INFO: BootInfo = BootInfo {
+    physical_memory_offset: 0,
+    framebuffer_addr: 0,
+    framebuffer_size: 0,
+    screen_width: 0,
+    screen_height: 0,
+    stride: 0,
+    memory_map_addr: 0,
+    memory_map_len: 0,
+    memory_map_entry_size: 0,
+};
 
+// メモリマップを静的に保存
+static mut MEMORY_MAP: [MemoryRegion; 256] = [MemoryRegion {
+    start: 0,
+    len: 0,
+    region_type: MemoryType::Reserved,
+}; 256];
+
+/// UEFIエントリーポイント
 #[entry]
 fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     if let Err(_) = uefi::helpers::init(&mut system_table) {
@@ -24,7 +40,84 @@ fn main(_image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let _ = system_table.stdout().clear();
     let _ = system_table
         .stdout()
-        .output_string(cstr16!("hello, world!\n"));
+        .output_string(cstr16!("Starting MyOS...\n"));
 
-    loop {}
+    // Graphics Output Protocolを取得してフレームバッファ情報を保存
+    let (fb_addr, fb_size, screen_w, screen_h, stride) = {
+        let gop_handle = match system_table
+            .boot_services()
+            .get_handle_for_protocol::<GraphicsOutput>()
+        {
+            Ok(handle) => handle,
+            Err(_) => return Status::UNSUPPORTED,
+        };
+
+        let mut gop = match system_table
+            .boot_services()
+            .open_protocol_exclusive::<GraphicsOutput>(gop_handle)
+        {
+            Ok(gop) => gop,
+            Err(_) => return Status::UNSUPPORTED,
+        };
+
+        let mode_info = gop.current_mode_info();
+        let mut framebuffer = gop.frame_buffer();
+
+        (
+            framebuffer.as_mut_ptr() as u64,
+            framebuffer.size(),
+            mode_info.resolution().0,
+            mode_info.resolution().1,
+            mode_info.stride(),
+        )
+    };
+
+    // Boot Servicesを終了してメモリマップを取得
+    let (_system_table, memory_map_iter) =
+        unsafe { system_table.exit_boot_services(uefi::table::boot::MemoryType::LOADER_DATA) };
+
+    // メモリマップを静的配列にコピー
+    let map_count;
+    unsafe {
+        let mut count = 0;
+        for (i, desc) in memory_map_iter.entries().enumerate() {
+            if i >= 256 {
+                break;
+            }
+            MEMORY_MAP[i] = MemoryRegion {
+                start: desc.phys_start,
+                len: desc.page_count * 4096,
+                region_type: match desc.ty {
+                    uefi::table::boot::MemoryType::CONVENTIONAL => MemoryType::Usable,
+                    uefi::table::boot::MemoryType::ACPI_RECLAIM => MemoryType::AcpiReclaimable,
+                    uefi::table::boot::MemoryType::ACPI_NON_VOLATILE => MemoryType::AcpiNvs,
+                    uefi::table::boot::MemoryType::UNUSABLE => MemoryType::BadMemory,
+                    uefi::table::boot::MemoryType::LOADER_CODE
+                    | uefi::table::boot::MemoryType::LOADER_DATA => {
+                        MemoryType::BootloaderReclaimable
+                    }
+                    _ => MemoryType::Reserved,
+                },
+            };
+            count += 1;
+        }
+        map_count = count;
+    }
+
+    #[allow(static_mut_refs)]
+    unsafe {
+        BOOT_INFO.physical_memory_offset = 0;
+        BOOT_INFO.framebuffer_addr = fb_addr;
+        BOOT_INFO.framebuffer_size = fb_size;
+        BOOT_INFO.screen_width = screen_w;
+        BOOT_INFO.screen_height = screen_h;
+        BOOT_INFO.stride = stride;
+        BOOT_INFO.memory_map_addr = MEMORY_MAP.as_ptr() as u64;
+        BOOT_INFO.memory_map_len = map_count;
+        BOOT_INFO.memory_map_entry_size = core::mem::size_of::<MemoryRegion>();
+    }
+
+    unsafe {
+        kernel_entry(&*core::ptr::addr_of!(BOOT_INFO));
+    }
 }
