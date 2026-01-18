@@ -1,0 +1,15 @@
+[package]
+name = "myos"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+uefi = { version = "0.30", features = ["alloc", "logger"] }
+log = "0.4"
+spin = "0.9"
+x86_64 = "0.15"
+bitflags = "2.4"
+
+[[bin]]
+name = "boot"
+path = "src/boot/loader.rs"
