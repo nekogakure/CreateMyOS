@@ -1,17 +1,25 @@
-pub use crate::display::draw_rect;
+pub use crate::display::{draw_rect, draw_window, screen_height, screen_width};
 pub use crate::BootInfo;
 pub use crate::font::draw_text;
 pub use crate::mem::show_memory_info;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
-    // 画面左上に100x100の水色の四角を描画
-    draw_rect(boot_info, 0, 0, 100, 100, 0x0067A7CC);
+    let dw = screen_width(boot_info);
+    let dh = screen_height(boot_info);
 
-    draw_text(boot_info, 10, 10, "Hello, MyOS!", 0x00FFFFFF);
+    // 画面いっぱいに青い背景を描画
+    draw_rect(boot_info, 0, 0, dw, dh, 0x0067A7CC);
 
-    show_memory_info(boot_info, 10, 30, 0x00FFFFFF);
+    // タスクバーっぽいのを描画
+    let taskbar_height = 40;
+    draw_rect(boot_info, 0, dh - taskbar_height, dw, taskbar_height, 0x00405060);
 
+    draw_window(boot_info, 50, 50, 300, 200, "Memory Info");
+    {
+        show_memory_info(boot_info, 60, 80, 0x00000000);
+    }
+    
     loop {}
 }
 

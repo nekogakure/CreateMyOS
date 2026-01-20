@@ -1001,3 +1001,154 @@ Totalが合計メモリサイズ、Usableが使用可能メモリサイズです
 Qemuで実行している場合、Totalが馬鹿みたいに大きいですが、Usableが512MiB程度であれば正常です。（たぶん問題ないと思っています）
 
 scripts/qemu-runner.shの`-m`オプションでメモリサイズを指定できるので、興味がある方はいろいろ変えて遊んでみてください！
+
+### 3.3 いい感じの画面を表示してみる。
+本来ならメモリ情報を取得できたことだしめでたしめでたし、なのですが文字だけだとなんだか味気ないので、いい感じの画面を表示してみましょう！
+
+Windowsみたいな感じの画面を表示してみます。
+
+...というにも、とりあえず画面のサイズを取得する必要がありますね。
+画面サイズはBootInfo構造体に保存されているので、それを使いましょう！
+`display.rs`に以下の関数を追加します
+
+```rust
+/// 幅
+pub fn screen_width(boot_info: &crate::BootInfo) -> usize {
+    boot_info.screen_width
+}
+
+/// 高さ
+pub fn screen_height(boot_info: &crate::BootInfo) -> usize {
+    boot_info.screen_height
+}
+```
+
+これを`kernel.rs`からインポートして、画面いっぱいに水色の背景を描画してみましょう！
+
+```rust
+pub use crate::display::{draw_rect, screen_height, screen_width};
+pub use crate::BootInfo;
+pub use crate::font::draw_text;
+pub use crate::mem::show_memory_info;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
+    let dw = screen_width(boot_info);
+    let dh = screen_height(boot_info);
+
+    // 画面いっぱいに青い背景を描画
+    draw_rect(boot_info, 0, 0, dw, dh, 0x0067A7CC);
+
+    draw_text(boot_info, 10, 10, "Hello, MyOS!", 0x00FFFFFF);
+
+    show_memory_info(boot_info, 10, 30, 0x00FFFFFF);
+
+    loop {}
+}
+```
+
+実行すると、いい感じに塗りつぶされて表示されたと思います。
+では、次にWindowsのタスクバーっぽいのを表示してみましょう！
+main.rsの背景を描画した後に以下のコードを追加しましょう。
+
+```rust
+    // タスクバー
+    let taskbar_height = 40;
+    draw_rect(boot_info, 0, dh - taskbar_height, dw, taskbar_height, 0x00405060);
+```
+
+実行してみてください。いい感じにタスクバーっぽいのが表示されたと思います。
+では最後に、ウィンドウらしきものを表示して、メモリ情報をその中に表示してみましょう！（といっても枠を無理やり描画して、その中にメモリ情報を表示するだけのお粗末なものですが、、）
+せっかくなのでwindow関数を作成して、ウィンドウを好きな位置に表示できるようにしましょう！
+display.rsに以下の関数を追加します。（あと、fontモジュールをdisplayでインポートしてください）
+
+```rust
+/// ウィンドウを描画する関数
+pub fn draw_window(
+    boot_info: &crate::BootInfo,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    title: &str,
+) {
+    // ウィンドウ本体
+    draw_rect(boot_info, x, y, w, h, 0x00FFFFFF);
+    // タイトルバー
+    let titlebar_height = 24;
+    draw_rect(boot_info, x, y, w, titlebar_height, 0x00405060);
+    // タイトルテキスト
+    draw_text(boot_info, x + 4, y + 4, title, 0x00FFFFFF);
+    // 枠線
+    let border_color = 0x00000000;
+    // 上
+    draw_rect(boot_info, x, y, w, 1, border_color);
+    // 下
+    draw_rect(boot_info, x, y + h - 1, w, 1, border_color);
+    // 左
+    draw_rect(boot_info, x, y, 1, h, border_color);
+    // 右
+    draw_rect(boot_info, x + w - 1, y, 1, h, border_color);
+}
+```
+
+kernel.rsに戻り、以下のように変更します。
+
+```rust
+pub use crate::display::{draw_rect, draw_window, screen_height, screen_width};
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
+    let dw = screen_width(boot_info);
+    let dh = screen_height(boot_info);
+
+    // 画面いっぱいに青い背景を描画
+    draw_rect(boot_info, 0, 0, dw, dh, 0x0067A7CC);
+
+    // タスクバーっぽいのを描画
+    let taskbar_height = 40;
+    draw_rect(boot_info, 0, dh - taskbar_height, dw, taskbar_height, 0x00405060);
+
+    draw_window(boot_info, 50, 50, 300, 200, "Memory Info");
+    {
+        show_memory_info(boot_info, 60, 80, 0x00000000);
+    }
+    
+    loop {}
+}
+```
+ここのブロックはなくても良いのですが、メモリ情報をウィンドウ内に表示することを強調するために追加しています。見やすさのためです。
+
+では、実行してみましょう！
+```bash
+cargo run
+```
+
+なんかめっちゃいい感じの画面が表示されたと思います！めっちゃいいかんじ！
+![いい感じの画面](img/window.png)
+
+お疲れさまでした！これで簡単なウィンドウっぽいものが表示できました！
+ここまでできたあなたは素晴らしいです！本当にお疲れさまでした！
+
+## おわりに
+以上で、あなたのMyOSカーネルは、基本的なメモリ管理とグラフィカルな表示機能を備えた状態になりました。
+ここまでの道のりは決して簡単ではなかったと思いますが、その努力は確実に実を結んでいます。
+だって、さっきまでカーネルって何？って感じだったのが、今では自分でOSの一部を作り上げているんですから！
+この経験は、今後のOS開発の旅において、非常に貴重なものとなると思っています
+
+そして、私の書いたこのぺら紙が、あなたのOS開発の一助となれば幸いです！
+
+今後の展望としては、ファイルシステムの実装、本格的なメモリ管理の実装、割込み処理の導入、さらにはマルチタスクの実装など、まだまだ多くの課題が待ち受けています。
+これらの課題に取り組むことで、あなたのMyOSはさらに進化し、より実用的なOSへと進化していくと思っています！！！
+
+OS開発に少しでも興味を持たれた方は、osdev.jpにぜひ参加してみてください！
+私たちは、OS開発に関する情報交換や助け合いを行うコミュニティです。
+初心者から上級者まで、幅広いレベルの開発者が参加しており、あなたのOS開発の旅をサポートしてくれることでしょう！
+Discord、メーリングリスト、Wikiなど、さまざまなリソースが利用可能です。
+HPはこちら: https://osdev.jp/
+
+そして最後に、OS開発は非常にチャレンジングな分野ですが、その分だけ達成感も大きいです。
+あなたのMyOSがどのように成長していくのか、非常に楽しみにしています！
+頑張ってください！応援しています！！！
+
+2026 ねこがくれ
