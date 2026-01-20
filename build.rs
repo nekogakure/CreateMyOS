@@ -1,5 +1,5 @@
 use std::env;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
@@ -56,7 +56,7 @@ fn main() {
                 if in_bitmap {
                     if cl.trim().is_empty() { continue; }
                     let hex = cl.trim();
-                    
+
                     let mut row_bytes: Vec<u8> = Vec::new();
                     let hex_clean = if hex.len() % 2 == 1 { format!("0{}", hex) } else { hex.to_string() };
                     for k in (0..hex_clean.len()).step_by(2) {

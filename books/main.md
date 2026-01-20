@@ -594,7 +594,7 @@ ttfなどとは異なり、非常にシンプルな形式なので、OS開発に
 
 ```rust
 use std::env;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
@@ -651,7 +651,7 @@ fn main() {
                 if in_bitmap {
                     if cl.trim().is_empty() { continue; }
                     let hex = cl.trim();
-                    
+
                     let mut row_bytes: Vec<u8> = Vec::new();
                     let hex_clean = if hex.len() % 2 == 1 { format!("0{}", hex) } else { hex.to_string() };
                     for k in (0..hex_clean.len()).step_by(2) {
@@ -860,3 +860,144 @@ cargo run
 
 さて、背景にブートローダーが表示している"Starting MyOS..."が見えていますね。
 これが嫌な人は四角形で塗りつぶすもよし、ブートローダーの表示自体を消すもよし、自由にカスタマイズしてみてください！
+
+### 3.2 メモリサイズの取得と表示
+では、メモリサイズを取得して表示してみましょう！
+メモリサイズを取得するには、UEFIのメモリマップを参照する必要があります。
+メモリマップとは、PCでメモリやいろいろなデバイスの各領域に割り当てられたアドレス（住所）を示す地図のようなもので、CPUが「どこに」「何が」あるかを認識し、データアクセスできるようにするための情報です。
+
+じゃあ、それってどうやって取得するの?とお思いかもしれません。
+いいえ、実はメモリマップはすでにブートローダーからカーネルに渡されています。
+第2章で頑張ってシステムテーブルを渡したのを覚えていますか？
+あれにメモリマップの情報も含められているのです！やったね！
+
+では、その情報を使って、メモリサイズを計算してみましょう！
+その際に、`heapless`クレートがあると便利なので、`Cargo.toml`ファイルに以下の内容を追加しておきます。
+
+```toml
+[dependencies]
+heapless = { version = "0.7", default-features = false }
+```
+
+heaplessクレートは、標準ライブラリを使わずに固定サイズのデータ構造を提供するクレートです。
+現在のOS開発環境では、標準ライブラリが使えないため、heaplessクレートを使うことで、動的メモリ割り当てなしでデータ構造を扱うことができます。
+
+では、src/kernel/mem.rsファイルを作成し、以下のコードを追加しましょう。
+
+```rust
+use crate::BootInfo;
+use crate::font::draw_text;
+use crate::{MemoryRegion, MemoryType};
+
+/// メモリサイズをMiB単位でフォーマットする関数
+fn format_mem_mib(mut mib: u64, out: &mut heapless::String<32>) {
+	if mib == 0 {
+		let _ = out.push_str("0");
+		return;
+	}
+	let mut buf = [0u8; 20];
+	let mut i = 0usize;
+	while mib > 0 {
+		buf[i] = b'0' + (mib % 10) as u8;
+		mib /= 10;
+		i += 1;
+	}
+	for j in (0..i).rev() {
+		let _ = out.push((buf[j] as char));
+	}
+}
+
+/// メモリ情報を画面に表示する関数
+pub fn show_memory_info(boot_info: &BootInfo, x: usize, y: usize, color: u32) {
+	let mut total: u64 = 0;
+	let mut usable: u64 = 0;
+
+    // メモリマップを走査して合計と使用可能メモリを計算
+	unsafe {
+		let entry_size = boot_info.memory_map_entry_size as usize;
+		let entries = boot_info.memory_map_len as usize;
+		let base = boot_info.memory_map_addr as *const u8;
+		for i in 0..entries {
+			let entry_ptr = base.add(i * entry_size) as *const MemoryRegion;
+			let region = &*entry_ptr;
+			total = total.saturating_add(region.len);
+			if region.region_type == MemoryType::Usable {
+				usable = usable.saturating_add(region.len);
+			}
+		}
+	}
+
+	let total_mib = total / 1024 / 1024;
+	let usable_mib = usable / 1024 / 1024;
+
+    // フォーマットして描画
+	let mut s1: heapless::String<32> = heapless::String::new();
+	let mut s2: heapless::String<32> = heapless::String::new();
+	format_mem_mib(total_mib, &mut s1);
+	format_mem_mib(usable_mib, &mut s2);
+
+	let mut line1: heapless::String<64> = heapless::String::new();
+	let _ = line1.push_str("Total: ");
+	let _ = line1.push_str(&s1);
+	let _ = line1.push_str(" MiB");
+
+	let mut line2: heapless::String<64> = heapless::String::new();
+	let _ = line2.push_str("Usable: ");
+	let _ = line2.push_str(&s2);
+	let _ = line2.push_str(" MiB");
+
+	draw_text(boot_info, x, y, &line1, color);
+	draw_text(boot_info, x, y + 16, &line2, color);
+}
+```
+
+このコードでは、`show_memory_info`関数でメモリマップを走査し、合計メモリサイズと使用可能メモリサイズを計算しています。
+詳しくは読んでみてください。意外とシンプルなコードになっています。
+
+では、カーネルからこの関数を呼び出してメモリ情報を表示させましょう！
+先ほどと同じく、`src/kernel/lib.rs`ファイルに以下の行を追加して、memモジュールを公開します。
+
+```diff
+/// フォント
+pub mod font;
+
++ /// メモリ
++ pub mod mem;
+```
+これでmemモジュールが使えるようになりました。
+
+では、`kernel.rs`ファイルを以下のように変更します。
+
+```rust
+pub use crate::display::draw_rect;
+pub use crate::BootInfo;
+pub use crate::font::draw_text;
+pub use crate::mem::show_memory_info;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
+    // 画面左上に100x100の水色の四角を描画
+    draw_rect(boot_info, 0, 0, 100, 100, 0x0067A7CC);
+
+    draw_text(boot_info, 10, 10, "Hello, MyOS!", 0x00FFFFFF);
+
+    show_memory_info(boot_info, 10, 30, 0x00FFFFFF);
+
+    loop {}
+}
+```
+
+これで、メモリ情報が表示されるようになります。
+では、さっそく実行してみましょう！
+
+```bash
+cargo run
+```
+
+というわけで、画面にメモリ情報が表示されました！
+![メモリ情報](img/mem.png)
+
+Totalが合計メモリサイズ、Usableが使用可能メモリサイズです。
+Qemuで実行している場合、Totalが馬鹿みたいに大きいですが、Usableが512MiB程度であれば正常です。（たぶん問題ないと思っています）
+
+scripts/qemu-runner.shの`-m`オプションでメモリサイズを指定できるので、興味がある方はいろいろ変えて遊んでみてください！

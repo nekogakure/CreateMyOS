@@ -12,6 +12,9 @@ pub mod display;
 
 /// フォント
 pub mod font;
+ 
+/// メモリ
+pub mod mem;
 
 #[repr(C)]
 pub struct BootInfo {
