@@ -1172,3 +1172,5 @@ HPはこちら: https://osdev.jp/
 頑張ってください！応援しています！！！
 
 2026 ねこがくれ
+
+追記: このOSのレポジトリは https://github.com/nekogakure/CreateMyOS です。チャプターごとにタグを発行しているので、困った際などに活用してください
