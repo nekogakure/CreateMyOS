@@ -10,6 +10,9 @@ pub mod kernel;
 /// ディスプレイ制御
 pub mod display;
 
+/// フォント
+pub mod font;
+
 #[repr(C)]
 pub struct BootInfo {
     /// 物理メモリオフセット

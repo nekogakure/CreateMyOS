@@ -168,6 +168,7 @@ fn panic(_info: &PanicInfo) -> ! {
 
 ここでは、非常にシンプルなカーネルを作成し、四角形を表示する方法を学びます。
 
+### 2.1 シンプルなカーネルの作成
 カーネルは`src/kernel`ディレクトリに配置していきます。
 まずは、`src/kernel/lib.rs`というファイルを作成し、以下のコードを追加します。
 ```rust
@@ -259,6 +260,7 @@ cargo run
 ...あれれ？なにも表示されませんね。
 当たり前です。今のままだとカーネルの`kernel_entry`関数は何もしていません。
 
+# 2.2 システムテーブルを持ってくる（from UEFI）
 では、どうやって四角形を表示させるかというと、UEFIのシステムテーブルをカーネルに渡して、ディスプレイに文字を表示させる必要があります。
 
 しかし、現状のコードではシステムテーブルをカーネルに渡していません。
@@ -474,6 +476,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 ```
 
+### 2.3 四角形を表示してみる
 では、この情報を使って、四角形を表示させましょう！
 kernel.rsに書いても良いのですが、見通しが悪くなるので、新たに`src/kernel/display.rs`ファイルを作成し、以下のコードを追加します。
 
@@ -562,4 +565,298 @@ EFIを使用することで、OSはハードウェアの詳細を気にせずに
 EFI形式の実行ファイルは、通常の実行ファイルとは異なり、EFI仕様に準拠した形式で作成されます。
 UEFIによって直接実行できるので、OSの起動に使用されます。
 
-Windowsの`.exe`やLinuxの`.elf`と同じようなものですね！（Linux向けバイナリには拡張子がないこともありますが...）
+Windowsの`.exe`やLinuxの`.elf`と同じようなものですね！（Linux向けバイナリには拡張子がないこともありますけど）
+
+## 3. ちょっとだけメモリ管理してみる
+OS開発において、メモリ管理は非常に重要な要素です。
+これなしにはOSと名乗れないと言っても過言ではありません。
+メモリ管理とは、PCのメモリ（RAM）を効率的に利用するための仕組みのことです。
+例えば、複数のアプリケーションが同時に動作する場合、それぞれのアプリケーションに適切なメモリ領域を割り当てる必要があります。
+一つのアプリがメモリを使いすぎて、他のアプリが動作しなくなったら大変ですよね。そういうのを防ぐためにメモリ管理が必要なのです。
+
+メモリ管理には、メモリの割り当てと解放、仮想メモリの管理、ページングなど、いろいろやることがあります。
+ここでは、非常に基本的なメモリ管理の仕組みを実装してみましょう！
+この章の終わりには、メモリサイズを取得して表示できるようになります！
+
+### 3.1 文字表示
+今はまだ四角形しか表示できませんが、メモリ容量とかを表示したいので、文字も表示できるようにしましょう！
+文字を表示するには、フォントデータが必要です。
+フォントを探して引っ張ってくるのはなかなか大変なので、筆者が見つけてきたフォントを使いましょう。
+このOSのレポジトリ（https://github.com/nekogakure/CreateMyOS）の中に`src/ter-u12b.bdf`というファイルがあります。これがフォントデータです。
+
+え、BDFって何？と思うかもしれませんが、これはビットマップフォントの一種で、文字ごとにピクセル単位で表現されたフォントデータを格納するための形式です。
+ttfなどとは異なり、非常にシンプルな形式なので、OS開発には適しています。
+
+では、このフォントデータを使って文字を表示する関数を実装しましょう！
+まずは、fontデータを読み込ませる必要がありますが、今はまだファイルシステム（ファイルの保存や読み込みを行う仕組み）が実装されていないので、ビルド時にフォントデータをrustのコードに組み込む必要があります。
+
+`build.rs`ファイルをプロジェクトのルートディレクトリに作成し、以下のコードを追加します。（バカみたいに汚いので読まなくていいです、、）
+
+```rust
+use std::env;
+use std::fs::{self, File};
+use std::io::{self, BufRead, Write};
+use std::path::Path;
+
+fn main() {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let bdf_path = Path::new(&manifest_dir).join("src/ter-u12b.bdf");
+    let out_path = Path::new(&manifest_dir).join("src/kernel/font_data.rs");
+
+    let file = match File::open(&bdf_path) {
+        Ok(f) => f,
+        Err(e) => {
+            panic!("failed to open {}: {}", bdf_path.display(), e);
+        }
+    };
+
+    let reader = io::BufReader::new(file);
+
+    /// BDFをパースしたフォントデータ
+    #[derive(Default)]
+    struct Glyph {
+        /// Unicodeコードポイント
+        code: i32,
+        /// バウンディングボックス幅
+        bbx_w: usize,
+        /// バウンディングボックス高さ
+        bbx_h: usize,
+        /// バウンディングボックスXオフセット
+        bbx_x: isize,
+        /// バウンディングボックスYオフセット
+        bbx_y: isize,
+        /// ビットマップデータ
+        bitmap: Vec<u8>,
+    }
+
+    let mut glyphs: Vec<Glyph> = Vec::new();
+
+    // すべての行を読み込み
+    let all_lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
+    let mut i = 0usize;
+    while i < all_lines.len() {
+        let line = &all_lines[i];
+        if line.starts_with("STARTCHAR") {
+            // ENDCHARを探す
+            let mut j = i + 1;
+            while j < all_lines.len() && !all_lines[j].starts_with("ENDCHAR") {
+                j += 1;
+            }
+            // i+1...j
+            let chunk = &all_lines[i+1..j.min(all_lines.len())];
+            let mut glyph = Glyph::default();
+
+            let mut in_bitmap = false;
+            for cl in chunk {
+                if in_bitmap {
+                    if cl.trim().is_empty() { continue; }
+                    let hex = cl.trim();
+                    
+                    let mut row_bytes: Vec<u8> = Vec::new();
+                    let hex_clean = if hex.len() % 2 == 1 { format!("0{}", hex) } else { hex.to_string() };
+                    for k in (0..hex_clean.len()).step_by(2) {
+                        let byte = u8::from_str_radix(&hex_clean[k..k+2], 16).unwrap_or(0);
+                        row_bytes.push(byte);
+                    }
+                    glyph.bitmap.extend(row_bytes);
+                    continue;
+                }
+                if cl.starts_with("ENCODING") {
+                    let parts: Vec<_> = cl.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        glyph.code = parts[1].parse::<i32>().unwrap_or(-1);
+                    }
+                } else if cl.starts_with("BBX") {
+                    let parts: Vec<_> = cl.split_whitespace().collect();
+                    if parts.len() >= 5 {
+                        glyph.bbx_w = parts[1].parse::<usize>().unwrap_or(0);
+                        glyph.bbx_h = parts[2].parse::<usize>().unwrap_or(0);
+                        glyph.bbx_x = parts[3].parse::<isize>().unwrap_or(0);
+                        glyph.bbx_y = parts[4].parse::<isize>().unwrap_or(0);
+                    }
+                } else if cl.starts_with("BITMAP") {
+                    in_bitmap = true;
+                }
+            }
+            if glyph.code >= 0 {
+                glyphs.push(glyph);
+            }
+            i = j + 1;
+            continue;
+        }
+        i += 1;
+    }
+
+    glyphs.retain(|g| (32..=126).contains(&g.code));
+    glyphs.sort_by_key(|g| g.code);
+
+    let glyph_height = glyphs.iter().map(|g| g.bbx_h).max().unwrap_or(8);
+
+    let mut offsets: Vec<u32> = Vec::new();
+    let mut widths: Vec<u8> = Vec::new();
+    let mut bitmap_bytes: Vec<u8> = Vec::new();
+    for g in &glyphs {
+        offsets.push(bitmap_bytes.len() as u32);
+        widths.push(g.bbx_w as u8);
+        let bytes_per_row = ((g.bbx_w + 7) / 8) as usize;
+        let rows_present = if bytes_per_row > 0 { g.bitmap.len() / bytes_per_row } else { 0 };
+        for r in 0..glyph_height {
+            if r < rows_present {
+                let start = r * bytes_per_row;
+                bitmap_bytes.extend_from_slice(&g.bitmap[start..start+bytes_per_row]);
+            } else {
+                bitmap_bytes.extend(std::iter::repeat(0u8).take(bytes_per_row));
+            }
+        }
+    }
+    offsets.push(bitmap_bytes.len() as u32);
+
+    let mut code_to_index: Vec<i32> = vec![-1; 95];
+    for (idx, g) in glyphs.iter().enumerate() {
+        let cp = g.code as usize;
+        if (32..=126).contains(&g.code) {
+            code_to_index[cp - 32] = idx as i32;
+        }
+    }
+
+    let mut out = File::create(&out_path).expect("failed to create font_data.rs");
+    writeln!(out, "// Auto-generated from {}", bdf_path.display()).unwrap();
+    writeln!(out, "pub const GLYPH_HEIGHT: usize = {};", glyph_height).unwrap();
+    writeln!(out, "pub const GLYPH_COUNT: usize = {};", glyphs.len()).unwrap();
+
+    writeln!(out, "pub const GLYPH_WIDTHS: [u8; {}] = [", widths.len()).unwrap();
+    for w in &widths { writeln!(out, "    {},", w).unwrap(); }
+    writeln!(out, "]; ").unwrap();
+
+    writeln!(out, "pub const GLYPH_OFFSETS: [u32; {}] = [", offsets.len()).unwrap();
+    for o in &offsets { writeln!(out, "    {},", o).unwrap(); }
+    writeln!(out, "]; ").unwrap();
+
+    writeln!(out, "pub const GLYPH_BITMAPS: [u8; {}] = [", bitmap_bytes.len()).unwrap();
+    for b in &bitmap_bytes { writeln!(out, "    {},", b).unwrap(); }
+    writeln!(out, "]; ").unwrap();
+
+    writeln!(out, "pub const CODE_TO_INDEX: [i32; 95] = [").unwrap();
+    for v in &code_to_index { writeln!(out, "    {},", v).unwrap(); }
+    writeln!(out, "]; ").unwrap();
+
+    println!("cargo:rerun-if-changed={}", bdf_path.display());
+}
+```
+
+このコードは、BDFフォントファイルを読み込み、Rustのソースコードとしてフォントデータを生成します。
+`build.rs`はビルド時に自動的に実行され、`src/kernel/font_data.rs`ファイルが生成されます。
+
+では、cargo.tomlファイルに以下の内容を追加して、ビルドスクリプトを指定しましょう！
+
+```toml
+[package]
+build = "build.rs"
+```
+
+では、`cargo build`を実行してみましょう！
+すると、`src/kernel/font_data.rs`ファイルが生成されます。
+
+中を見てみると、わけのわからない大量の配列が生成されていることがわかります。
+これは、フォントの各文字のビットマップデータや幅、オフセットなどが格納されています。
+では、文字を表示する関数を実装しましょう！
+
+`src/kernel/font.rs`ファイルを作成し、以下のコードを追加します。
+```rust
+use crate::BootInfo;
+
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/kernel/font_data.rs"));
+
+/// 1文字を描画する関数
+pub fn draw_char(boot_info: &BootInfo, x: usize, y: usize, ch: u8, color: u32) {
+    if ch < 32 || ch > 126 {
+        return;
+    }
+    let idx = CODE_TO_INDEX[(ch - 32) as usize];
+    if idx < 0 { return; }
+    let idx = idx as usize;
+
+    let width = GLYPH_WIDTHS[idx] as usize;
+    let height = GLYPH_HEIGHT;
+
+    let bytes_per_row = ((width + 7) / 8) as usize;
+    let start = GLYPH_OFFSETS[idx] as usize;
+    let fb = boot_info.framebuffer_addr as *mut u32;
+    let stride = boot_info.stride;
+    for row in 0..height {
+        let row_offset = start + row * bytes_per_row;
+        for col in 0..width {
+            let byte_index = row_offset + (col / 8);
+            if byte_index >= GLYPH_BITMAPS.len() { continue; }
+            let byte = GLYPH_BITMAPS[byte_index];
+            let bit = 7 - (col % 8);
+            if ((byte >> bit) & 1) != 0 {
+                let px = x + col;
+                let py = y + row;
+                if px < boot_info.screen_width && py < boot_info.screen_height {
+                    unsafe {
+                        let off = py * stride + px;
+                        fb.add(off).write_volatile(color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 文字列を描画する関数
+pub fn draw_text(boot_info: &BootInfo, mut x: usize, y: usize, s: &str, color: u32) {
+    for &b in s.as_bytes() {
+        if b < 32 || b > 126 { x += 4; continue; }
+        let idx = CODE_TO_INDEX[(b - 32) as usize];
+        if idx < 0 { x += 4; continue; }
+        let w = GLYPH_WIDTHS[idx as usize] as usize;
+        draw_char(boot_info, x, y, b, color);
+        x += w + 1;
+    }
+}
+```
+
+このコードでは、`draw_char`関数で1文字を描画し、`draw_text`関数で文字列を描画しています。
+BDFについて詳しく知りたい方は、ネットで調べてみてください。
+
+では、カーネルメインからこの関数を呼び出して文字を表示させましょう！
+...いや、その前に`src/kernel/lib.rs`ファイルに以下の行を追加して、fontモジュールを公開しないといけません
+
+```diff
+/// カーネル本体
+pub mod kernel;
+
+/// ディスプレイ制御
+pub mod display;
+
++ /// フォント
++ pub mod font;
+```
+
+次に、カーネルメインからこの関数を呼び出して文字を表示させます。
+```rust
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
+    // 画面左上に100x100の水色の四角を描画
+    draw_rect(boot_info, 0, 0, 100, 100, 0x0067A7CC);
+
+    draw_text(boot_info, 10, 10, "Hello, MyOS!", 0x00FFFFFF);
+
+    loop {}
+}
+```
+
+では、さっそく実行してみましょう！
+```bash
+cargo run
+```
+
+うおおおお！でたぞ！！四角形の上に文字が！！
+![テキスト](img/text.png)
+
+これで文字表示ができるようになりました！お疲れさまです！
+休憩がてら、文字の色や位置、表示する文字列を変えてみてください！
+
+さて、背景にブートローダーが表示している"Starting MyOS..."が見えていますね。
+これが嫌な人は四角形で塗りつぶすもよし、ブートローダーの表示自体を消すもよし、自由にカスタマイズしてみてください！

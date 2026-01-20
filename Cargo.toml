@@ -2,6 +2,7 @@
 name = "myos"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 
 [dependencies]
 uefi = { version = "0.30", features = ["alloc", "logger"] }
